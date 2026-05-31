@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.services.whatsapp_service import WhatsAppService
+from app.services.broker_publisher import broker_publisher
 from app.schemas.whatsapp import SendMessageRequest, SendMessageResponse
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
@@ -134,7 +135,19 @@ async def receive_webhook(request: Request):
                                     )
                                     logger.info(f"Message received - From: {from_number}, Type: {message_type}, ID: {message_id}")
                                     
-                                    # TODO: Process message (route to N8N, ADK, OpenClaw, etc.)
+                                    # Build and publish event to broker (non-blocking)
+                                    event = broker_publisher.build_whatsapp_event(
+                                        contact_id=from_number,
+                                        message_type=message_type,
+                                        text_body=text_body,
+                                        message_id=message_id,
+                                        raw_payload_summary={
+                                            "messaging_product": value.get("messaging_product"),
+                                            "display_phone_number": value.get("metadata", {}).get("display_phone_number"),
+                                            "contact_id": value.get("contacts", [{}])[0].get("wa_id") if value.get("contacts") else None,
+                                        },
+                                    )
+                                    broker_publisher.publish_event(event)
         
         return {"status": "ok"}
     

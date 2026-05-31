@@ -26,7 +26,7 @@ class TestWebhookVerification:
             )
             
             assert response.status_code == 200
-            assert response.json() == "1234567890"
+            assert response.text == "1234567890"  # FastAPI PlainTextResponse
     
     def test_verify_webhook_invalid_token(self):
         """Test webhook verification with invalid token"""
