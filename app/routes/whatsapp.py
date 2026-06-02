@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.services.whatsapp_service import WhatsAppService
+from app.services.rabbitmq_publisher import rabbitmq_publisher, build_wa_event, build_routing_key
 from app.schemas.whatsapp import SendMessageRequest, SendMessageResponse
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
@@ -51,40 +52,16 @@ async def verify_webhook(
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
 ):
-    """
-    Webhook verification endpoint for Meta WhatsApp Cloud API
-    
-    Meta will call this endpoint with hub.mode, hub.verify_token, and hub.challenge
-    to verify the webhook URL.
-    
-    Args:
-        hub_mode: Should be "subscribe"
-        hub_verify_token: Token to verify (must match WHATSAPP_VERIFY_TOKEN)
-        hub_challenge: Challenge string to return if verification succeeds
-    
-    Returns:
-        str: hub.challenge if verification succeeds
-    
-    Raises:
-        HTTPException: 403 if verification fails
-    """
-    logger.info(f"Webhook verification request: mode={hub_mode}, token={hub_verify_token[:10] if hub_verify_token else None}...")
-    
-    # Check if all required parameters are present
+    """Webhook verification for Meta WhatsApp Cloud API."""
     if not hub_mode or not hub_verify_token or not hub_challenge:
-        logger.error("Missing required parameters for webhook verification")
         raise HTTPException(status_code=400, detail="Missing required parameters")
-    
-    # Check if mode is subscribe
+
     if hub_mode != "subscribe":
-        logger.error(f"Invalid hub.mode: {hub_mode}")
         raise HTTPException(status_code=400, detail="Invalid hub.mode")
-    
-    # Verify token
+
     if hub_verify_token != settings.whatsapp_verify_token:
-        logger.error("Invalid verify token")
         raise HTTPException(status_code=403, detail="Invalid verify token")
-    
+
     logger.info("Webhook verification successful")
     return PlainTextResponse(content=hub_challenge, media_type="text/plain")
 
@@ -92,39 +69,44 @@ async def verify_webhook(
 @router.post("/webhook/whatsapp")
 async def receive_webhook(request: Request):
     """
-    Receive incoming WhatsApp messages from Meta
-    
-    This endpoint receives webhook events from Meta WhatsApp Cloud API
-    when users send messages to the WhatsApp Business number.
-    
-    Args:
-        request: FastAPI Request object containing the webhook payload
-    
-    Returns:
-        dict: Success response
+    Receive incoming WhatsApp messages from Meta.
+    Validates, parses, publishes to RabbitMQ, returns 200 to Meta.
+    Does NOT perform business logic.
     """
     try:
         body = await request.json()
-        logger.info(f"Received webhook: {body}")
-        
-        # Extract message data if present
+        logger.info(f"Received webhook payload")
+
         if "entry" in body:
             for entry in body["entry"]:
                 if "changes" in entry:
                     for change in entry["changes"]:
                         if "value" in change:
                             value = change["value"]
-                            
-                            # Check if there are messages
+                            metadata = value.get("metadata", {})
+                            phone_number_id = metadata.get("phone_number_id", "")
+                            messaging_product = value.get("messaging_product", "whatsapp")
+
                             if "messages" in value:
                                 for message in value["messages"]:
-                                    from_number = message.get("from")
-                                    message_type = message.get("type")
-                                    message_id = message.get("id")
+                                    from_number = message.get("from", "")
+                                    message_type = message.get("type", "unknown")
+                                    message_id = message.get("id", "")
                                     text_body = None
                                     if message_type == "text":
                                         text_body = message.get("text", {}).get("body")
-                                    # Log to JSONL file for persistence
+
+                                    # Get sender info
+                                    contacts = value.get("contacts", [])
+                                    sender_name = None
+                                    sender_wa_id = None
+                                    for contact in contacts:
+                                        if contact.get("wa_id") == from_number:
+                                            sender_name = contact.get("profile", {}).get("name")
+                                            sender_wa_id = contact.get("wa_id")
+                                            break
+
+                                    # Log to JSONL
                                     _log_webhook_event(
                                         event_type="webhook_received",
                                         sender=from_number,
@@ -132,46 +114,52 @@ async def receive_webhook(request: Request):
                                         text_body=text_body,
                                         raw_payload=body
                                     )
-                                    logger.info(f"Message received - From: {from_number}, Type: {message_type}, ID: {message_id}")
-                                    
-                                    # TODO: Process message (route to N8N, ADK, OpenClaw, etc.)
-        
+                                    logger.info(f"Message - From: {from_number}, Type: {message_type}, ID: {message_id}")
+
+                                    # Build structured event
+                                    event = build_wa_event(
+                                        event_id=None,
+                                        phone_number_id=phone_number_id,
+                                        sender_phone=from_number,
+                                        sender_wa_id=sender_wa_id,
+                                        sender_name=sender_name,
+                                        message_id=message_id,
+                                        message_type=message_type,
+                                        text_body=text_body,
+                                        message_timestamp=message.get("timestamp", ""),
+                                        raw_payload_summary={
+                                            "messaging_product": messaging_product,
+                                        },
+                                    )
+
+                                    # Publish to RabbitMQ (async, non-blocking)
+                                    routing_key = build_routing_key(message_type)
+                                    await rabbitmq_publisher.publish(event, routing_key)
+
+        # Always return 200 to Meta, even if RabbitMQ fails
         return {"status": "ok"}
-    
+
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
+        # Still return 200 to Meta to prevent webhook retry storms
+        return {"status": "ok"}
 
 
 @router.post("/send-message", response_model=SendMessageResponse)
 async def send_message(request: SendMessageRequest):
-    """
-    Send a WhatsApp message
-    
-    This endpoint allows sending text messages via WhatsApp Cloud API.
-    
-    Args:
-        request: SendMessageRequest containing recipient number and message text
-    
-    Returns:
-        SendMessageResponse: Status and message ID if successful
-    
-    Raises:
-        HTTPException: 500 if sending fails
-    """
+    """Send a WhatsApp message via Meta Graph API."""
     try:
         result = await whatsapp_service.send_message(request.to, request.message)
-        
-        # Extract message ID from Meta response
+
         message_id = None
         if "messages" in result and len(result["messages"]) > 0:
             message_id = result["messages"][0].get("id")
-        
+
         return SendMessageResponse(
             status="success",
             message_id=message_id
         )
-    
+
     except Exception as e:
         logger.error(f"Error sending message: {str(e)}")
         return SendMessageResponse(
