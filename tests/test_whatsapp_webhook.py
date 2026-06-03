@@ -1,7 +1,7 @@
 """Tests for WhatsApp webhook endpoints"""
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from app.main import app
 from app.config import settings
@@ -237,3 +237,34 @@ class TestWebhookReceiveMediaTypes:
         response = client.post("/webhook/whatsapp", json=payload)
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+
+class TestSendMessageReplyTo:
+    """Tests for /send-message with reply_to threading."""
+
+    def test_send_message_without_reply_to(self):
+        """send_message without reply_to should call WhatsAppService with reply_to=None."""
+        with patch("app.routes.whatsapp.whatsapp_service.send_message", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = {"messages": [{"id": "wamid.reply1"}]}
+            response = client.post("/send-message", json={
+                "to": "6281234567890",
+                "message": "Hello!",
+            })
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "success"
+            mock_send.assert_called_once_with("6281234567890", "Hello!", reply_to=None)
+
+    def test_send_message_with_reply_to(self):
+        """send_message with reply_to should pass it through to WhatsAppService."""
+        with patch("app.routes.whatsapp.whatsapp_service.send_message", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = {"messages": [{"id": "wamid.reply2"}]}
+            response = client.post("/send-message", json={
+                "to": "6281234567890",
+                "message": "Hello back!",
+                "reply_to": "wamid.original123",
+            })
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "success"
+            mock_send.assert_called_once_with("6281234567890", "Hello back!", reply_to="wamid.original123")

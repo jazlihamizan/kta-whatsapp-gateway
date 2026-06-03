@@ -187,7 +187,7 @@ async def receive_webhook(request: Request):
 async def send_message(request: SendMessageRequest):
     """Send a WhatsApp message via Meta Graph API."""
     try:
-        result = await whatsapp_service.send_message(request.to, request.message)
+        result = await whatsapp_service.send_message(request.to, request.message, reply_to=request.reply_to)
 
         message_id = None
         if "messages" in result and len(result["messages"]) > 0:

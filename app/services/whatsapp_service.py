@@ -29,12 +29,13 @@ class WhatsAppService:
             await self._client.aclose()
             self._client = None
 
-    async def send_message(self, to: str, message: str) -> Dict:
+    async def send_message(self, to: str, message: str, reply_to: Optional[str] = None) -> Dict:
         """Send a text message via WhatsApp Cloud API.
 
         Args:
             to: Recipient phone number in E.164 format (e.g., 6281234567890)
             message: Message text to send
+            reply_to: Optional message ID to reply to (enables threaded reply on WA client)
 
         Returns:
             dict: Response from Meta Graph API
@@ -62,7 +63,11 @@ class WhatsAppService:
             "text": {"body": message},
         }
 
-        logger.info(f"Sending message to {to}")
+        # Include context with reply_to for threaded message on WA client
+        if reply_to:
+            payload["context"] = {"message_id": reply_to}
+
+        logger.info(f"Sending message to {to}, reply_to={reply_to}")
 
         try:
             client = self._get_client()
