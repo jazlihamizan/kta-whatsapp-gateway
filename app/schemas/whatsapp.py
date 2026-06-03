@@ -7,12 +7,16 @@ class SendMessageRequest(BaseModel):
     """Request schema for sending WhatsApp message"""
     to: str = Field(..., description="Recipient phone number (E.164 format, e.g., 6281234567890)")
     message: str = Field(..., description="Message text to send", min_length=1)
+    reply_to: Optional[str] = Field(None, description="Original message ID this reply refers to (for Phase 2 dedup/trace)")
+    metadata: Optional[dict] = Field(None, description="Optional metadata: source_service, trace_id, etc. (for Phase 2 dedup/trace)")
     
     class Config:
         json_schema_extra = {
             "example": {
                 "to": "6281234567890",
-                "message": "Hello from KTA WhatsApp Gateway!"
+                "message": "Hello from KTA WhatsApp Gateway!",
+                "reply_to": "wamid.HBgLNjI4MTIz...",
+                "metadata": {"source_service": "wa-router", "trace_id": "gw-20260531143000"}
             }
         }
 
