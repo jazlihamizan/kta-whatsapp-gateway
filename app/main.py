@@ -43,14 +43,14 @@ async def startup_event():
     logger.info("Starting KTA WhatsApp Gateway...")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Meta Graph API version: {settings.meta_graph_api_version}")
-    
+
     # Verify critical settings
     if not settings.whatsapp_verify_token:
         logger.warning("WHATSAPP_VERIFY_TOKEN not set - webhook verification will fail")
-    
+
     if not settings.whatsapp_access_token:
         logger.warning("WHATSAPP_ACCESS_TOKEN not set - sending messages will fail")
-    
+
     if not settings.whatsapp_phone_number_id:
         logger.warning("WHATSAPP_PHONE_NUMBER_ID not set - sending messages will fail")
 
@@ -59,6 +59,9 @@ async def startup_event():
 async def shutdown_event():
     """Application shutdown event"""
     logger.info("Shutting down KTA WhatsApp Gateway...")
+    await whatsapp.whatsapp_service.close()
+    from app.services.rabbitmq_publisher import rabbitmq_publisher
+    await rabbitmq_publisher.close()
 
 
 if __name__ == "__main__":
