@@ -42,6 +42,7 @@ def build_wa_event(
     text_body: Optional[str],
     message_timestamp: int,
     raw_payload_summary: Optional[dict],
+    media_info: Optional[dict] = None,
 ) -> dict:
     """
     Build a structured WhatsApp event for RabbitMQ.
@@ -57,10 +58,20 @@ def build_wa_event(
         text_body: Text body if message_type is text
         message_timestamp: Unix timestamp of message
         raw_payload_summary: Non-sensitive payload metadata
+        media_info: Optional media metadata (id, mime_type, caption, etc.)
 
     Returns:
         Structured event dict
     """
+    message_data: dict = {
+        "id": message_id,
+        "type": message_type,
+        "text_body": text_body or "",
+        "timestamp": message_timestamp,
+    }
+    if media_info:
+        message_data["media"] = media_info
+
     return {
         "event_name": "whatsapp.message.received",
         "event_id": event_id or f"evt_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
@@ -72,12 +83,7 @@ def build_wa_event(
             "wa_id": sender_wa_id or "",
             "name": sender_name or "",
         },
-        "message": {
-            "id": message_id,
-            "type": message_type,
-            "text_body": text_body or "",
-            "timestamp": message_timestamp,
-        },
+        "message": message_data,
         "context": {
             "trace_id": f"gw-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
         },

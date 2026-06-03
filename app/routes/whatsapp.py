@@ -66,6 +66,35 @@ async def verify_webhook(
     return PlainTextResponse(content=hub_challenge, media_type="text/plain")
 
 
+def _extract_media_info(message: dict) -> dict:
+    """Extract media metadata from a non-text WhatsApp message.
+
+    Returns a dict with media_id, mime_type, sha256, filename (if available),
+    and caption (if available).  Returns empty dict for unknown types.
+    """
+    msg_type = message.get("type", "")
+    type_block = message.get(msg_type, {})
+
+    if not isinstance(type_block, dict):
+        return {}
+
+    info: dict = {}
+
+    # Common media fields (image, document, audio, video, sticker)
+    for field in ("id", "mime_type", "sha256", "filename", "caption"):
+        if field in type_block:
+            info[field] = type_block[field]
+
+    # Location type has different structure
+    if msg_type == "location":
+        info["id"] = message.get("id", "")
+        for loc_field in ("latitude", "longitude", "name", "address"):
+            if loc_field in type_block:
+                info[loc_field] = type_block[loc_field]
+
+    return info
+
+
 @router.post("/webhook/whatsapp")
 async def receive_webhook(request: Request):
     """
@@ -92,9 +121,17 @@ async def receive_webhook(request: Request):
                                     from_number = message.get("from", "")
                                     message_type = message.get("type", "unknown")
                                     message_id = message.get("id", "")
+
+                                    # --- Extract content by type ---
                                     text_body = None
+                                    media_info = {}
+
                                     if message_type == "text":
                                         text_body = message.get("text", {}).get("body")
+                                    elif message_type in ("image", "document", "audio", "video", "sticker", "location"):
+                                        media_info = _extract_media_info(message)
+                                    # other types (contacts, reaction, interactive, etc.)
+                                    # remain as empty media_info — still published safely
 
                                     # Get sender info
                                     contacts = value.get("contacts", [])
@@ -130,6 +167,7 @@ async def receive_webhook(request: Request):
                                         raw_payload_summary={
                                             "messaging_product": messaging_product,
                                         },
+                                        media_info=media_info if media_info else None,
                                     )
 
                                     # Publish to RabbitMQ (async, non-blocking)

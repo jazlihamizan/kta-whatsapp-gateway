@@ -187,3 +187,83 @@ class TestNoBrokerAPICall:
         assert "/v1/agent" not in event_str
         assert "broker_api_url" not in event_str
         assert "prompt" not in event_str.lower()  # Old pattern used prompt=
+
+
+class TestBuildWAEventWithMedia:
+    """Tests for structured WA event builder with media info."""
+
+    def test_build_event_image_with_media_info(self):
+        """Test building an image event with media metadata."""
+        media = {"id": "MEDIA_IMG_123", "mime_type": "image/jpeg", "caption": "KTP"}
+        event = build_wa_event(
+            event_id="wamid.img1",
+            phone_number_id="1091317450740252",
+            sender_phone="6281234567890",
+            sender_wa_id="6281234567890",
+            sender_name="John",
+            message_id="wamid.img1",
+            message_type="image",
+            text_body=None,
+            message_timestamp=1234567890,
+            raw_payload_summary={"messaging_product": "whatsapp"},
+            media_info=media,
+        )
+        assert event["message"]["type"] == "image"
+        assert event["message"]["media"]["id"] == "MEDIA_IMG_123"
+        assert event["message"]["media"]["mime_type"] == "image/jpeg"
+        assert event["message"]["media"]["caption"] == "KTP"
+        assert event["message"]["text_body"] == ""
+
+    def test_build_event_document_with_media_info(self):
+        """Test building a document event with filename."""
+        media = {"id": "MEDIA_DOC_456", "filename": "scan.pdf", "mime_type": "application/pdf"}
+        event = build_wa_event(
+            event_id="wamid.doc1",
+            phone_number_id="1091317450740252",
+            sender_phone="6281234567890",
+            sender_wa_id="6281234567890",
+            sender_name="John",
+            message_id="wamid.doc1",
+            message_type="document",
+            text_body=None,
+            message_timestamp=1234567890,
+            raw_payload_summary={"messaging_product": "whatsapp"},
+            media_info=media,
+        )
+        assert event["message"]["media"]["filename"] == "scan.pdf"
+
+    def test_build_event_location_with_media_info(self):
+        """Test building a location event with coordinates."""
+        media = {"latitude": -6.2088, "longitude": 106.8456, "name": "Gedung"}
+        event = build_wa_event(
+            event_id="wamid.loc1",
+            phone_number_id="1091317450740252",
+            sender_phone="6281234567890",
+            sender_wa_id="6281234567890",
+            sender_name="John",
+            message_id="wamid.loc1",
+            message_type="location",
+            text_body=None,
+            message_timestamp=1234567890,
+            raw_payload_summary={"messaging_product": "whatsapp"},
+            media_info=media,
+        )
+        assert event["message"]["media"]["latitude"] == -6.2088
+        assert event["message"]["media"]["longitude"] == 106.8456
+
+    def test_build_event_text_without_media_info(self):
+        """Text event should NOT have 'media' key when media_info is omitted."""
+        event = build_wa_event(
+            event_id="wamid.txt1",
+            phone_number_id="1091317450740252",
+            sender_phone="6281234567890",
+            sender_wa_id="6281234567890",
+            sender_name="John",
+            message_id="wamid.txt1",
+            message_type="text",
+            text_body="Hello",
+            message_timestamp=1234567890,
+            raw_payload_summary={"messaging_product": "whatsapp"},
+        )
+        assert "media" not in event["message"]
+        assert event["message"]["text_body"] == "Hello"
