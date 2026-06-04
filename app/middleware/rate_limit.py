@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.metrics import RATE_LIMITED
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ def check_rate_limit(request: Request) -> Optional[JSONResponse]:
     ip = get_client_ip(request)
     if not _rate_limiter.is_allowed(ip):
         logger.warning(f"Rate limit exceeded for IP: {ip}")
+        # G5: Track rate limit hit (endpoint inferred from call site)
+        RATE_LIMITED.labels(endpoint="webhook").inc()
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},

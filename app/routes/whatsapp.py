@@ -6,6 +6,7 @@ import logging
 import json
 import hashlib
 import hmac
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,15 @@ from app.services.rabbitmq_publisher import rabbitmq_publisher, build_wa_event, 
 from app.services.event_store import get_event_store
 from app.schemas.whatsapp import SendMessageRequest, SendMessageResponse
 from app.middleware.rate_limit import check_rate_limit
+
+from app.metrics import (
+    WEBHOOK_RECEIVED,
+    SIGNATURE_VERIFICATION,
+    RATE_LIMITED,
+    PUBLISH_TOTAL,
+    PUBLISH_LATENCY,
+    EVENT_STORE_WRITES,
+)
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_FILE = LOG_DIR / "webhook_events.jsonl"
@@ -212,11 +222,21 @@ async def receive_webhook(request: Request):
     sig_error = await _verify_signature(request)
     if sig_error:
         logger.warning(f"Webhook signature verification failed: {sig_error}")
+        # G5: Track signature verification failures
+        SIGNATURE_VERIFICATION.labels(status="invalid").inc()
         raise HTTPException(status_code=401, detail=sig_error)
+
+    # G5: Track signature verification outcomes (only when verification is enabled)
+    if settings.whatsapp_signature_verify_enabled:
+        SIGNATURE_VERIFICATION.labels(status="valid").inc()
+    else:
+        SIGNATURE_VERIFICATION.labels(status="disabled").inc()
 
     # R6: Rate limiting
     rate_limited = check_rate_limit(request)
     if rate_limited:
+        # G5: Track rate limit hits on webhook endpoint
+        RATE_LIMITED.labels(endpoint="webhook").inc()
         return rate_limited
 
     try:
@@ -279,6 +299,9 @@ async def receive_webhook(request: Request):
                                     )
                                     logger.info(f"Message - From: {from_number}, Type: {message_type}, ID: {message_id}")
 
+                                    # G5: Track received message by type
+                                    WEBHOOK_RECEIVED.labels(message_type=message_type).inc()
+
                                     # Build structured event
                                     event = build_wa_event(
                                         event_id=None,
@@ -304,21 +327,34 @@ async def receive_webhook(request: Request):
 
                                     # Publish to RabbitMQ and track status
                                     try:
+                                        publish_start = time.perf_counter()
                                         published = await rabbitmq_publisher.publish(event, routing_key)
+                                        publish_latency = time.perf_counter() - publish_start
+
                                         if published:
                                             event_store.update_publish_status(event["event_id"], "published")
+                                            # G5: Track successful publish with routing key label
+                                            PUBLISH_TOTAL.labels(status="published", routing_key=routing_key).inc()
                                         else:
-                                            # Publish returned False (connection/encoding failure)
                                             event_store.update_publish_status(
                                                 event["event_id"], "failed",
                                                 error_message="RabbitMQ publish returned False"
                                             )
+                                            # G5: Track failed publish with routing key label
+                                            PUBLISH_TOTAL.labels(status="failed", routing_key=routing_key).inc()
+
+                                        # G5: Track publish latency
+                                        PUBLISH_LATENCY.observe(publish_latency)
+
                                     except Exception as pub_err:
                                         # Unexpected exception (not a publish return-value failure)
                                         logger.error(f"RabbitMQ publish failed for {event.get('event_id')}: {pub_err}")
                                         event_store.update_publish_status(
                                             event["event_id"], "failed", error_message=str(pub_err)
                                         )
+                                        # G5: Track exception as failed publish
+                                        PUBLISH_TOTAL.labels(status="failed", routing_key=routing_key).inc()
+                                        PUBLISH_LATENCY.observe(time.perf_counter() - publish_start)
                                         # Webhook still returns 200 OK to Meta (contract)
 
         # Always return 200 to Meta, even if RabbitMQ fails

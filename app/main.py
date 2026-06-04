@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routes import health, whatsapp
+from app.routes import health, whatsapp, metrics
 from app.middleware.rate_limit import check_rate_limit, _rate_limiter
 
 # Configure logging
@@ -99,6 +99,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(health.router, tags=["Health"])
 app.include_router(whatsapp.router, tags=["WhatsApp"])
+app.include_router(metrics.router, tags=["Metrics"])
 
 
 if __name__ == "__main__":
