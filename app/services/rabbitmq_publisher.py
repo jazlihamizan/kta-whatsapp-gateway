@@ -27,6 +27,7 @@ def build_routing_key(message_type: str) -> str:
         "location": "wa.inbound.location",
         "contacts": "wa.inbound.contacts",
         "reaction": "wa.inbound.reaction",
+        "interactive": "wa.inbound.interactive",
     }
     return type_map.get(message_type, "wa.inbound.unknown")
 
@@ -43,6 +44,7 @@ def build_wa_event(
     message_timestamp: int,
     raw_payload_summary: Optional[dict],
     media_info: Optional[dict] = None,
+    interactive_info: Optional[dict] = None,
 ) -> dict:
     """
     Build a structured WhatsApp event for RabbitMQ.
@@ -59,6 +61,7 @@ def build_wa_event(
         message_timestamp: Unix timestamp of message
         raw_payload_summary: Non-sensitive payload metadata
         media_info: Optional media metadata (id, mime_type, caption, etc.)
+        interactive_info: Optional interactive metadata (type, id, title, description)
 
     Returns:
         Structured event dict
@@ -71,6 +74,8 @@ def build_wa_event(
     }
     if media_info:
         message_data["media"] = media_info
+    if interactive_info:
+        message_data["interactive"] = interactive_info
 
     return {
         "event_name": "whatsapp.message.received",

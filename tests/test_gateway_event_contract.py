@@ -201,10 +201,13 @@ class TestBuildRoutingKey:
     def test_routing_key_reaction(self):
         assert build_routing_key("reaction") == "wa.inbound.reaction"
 
+    def test_routing_key_interactive_type(self):
+        """Interactive message types should route to wa.inbound.interactive."""
+        assert build_routing_key("interactive") == "wa.inbound.interactive"
+
     def test_routing_key_unknown_type(self):
         """Unknown message types should fallback to wa.inbound.unknown."""
-        assert build_routing_key("interactive") == "wa.inbound.unknown"
-        assert build_routing_key("unknown_type") == "wa.inbound.unknown"
+        assert build_routing_key("completely_fake_type") == "wa.inbound.unknown"
 
 
 class TestEventContractWithBroker:

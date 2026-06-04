@@ -168,6 +168,39 @@ def _extract_media_info(message: dict) -> dict:
     return info
 
 
+def _parse_interactive_message(message: dict) -> dict:
+    """Extract interactive message metadata (button_reply or list_reply).
+
+    Returns a dict with:
+      - type: 'button_reply' or 'list_reply'
+      - id: reply ID
+      - title: reply title/label
+      - description: (list_reply only) optional description
+    Returns empty dict if interactive payload is malformed.
+    """
+    interactive = message.get("interactive", {})
+
+    # button_reply or list_reply — one of them exists
+    if "button_reply" in interactive:
+        reply = interactive["button_reply"]
+        return {
+            "type": "button_reply",
+            "id": reply.get("id", ""),
+            "title": reply.get("title", ""),
+        }
+
+    if "list_reply" in interactive:
+        reply = interactive["list_reply"]
+        return {
+            "type": "list_reply",
+            "id": reply.get("id", ""),
+            "title": reply.get("title", ""),
+            "description": reply.get("description", ""),
+        }
+
+    return {}
+
+
 @router.post("/webhook/whatsapp")
 async def receive_webhook(request: Request):
     """
@@ -209,12 +242,21 @@ async def receive_webhook(request: Request):
                                     # --- Extract content by type ---
                                     text_body = None
                                     media_info = {}
+                                    interactive_info = None
 
                                     if message_type == "text":
                                         text_body = message.get("text", {}).get("body")
                                     elif message_type in ("image", "document", "audio", "video", "sticker", "location"):
                                         media_info = _extract_media_info(message)
-                                    # other types (contacts, reaction, interactive, etc.)
+                                    elif message_type == "interactive":
+                                        # G4: Parse interactive messages (button_reply or list_reply)
+                                        interactive_info = _parse_interactive_message(message)
+                                        # button_reply and list_reply have a single nested message
+                                        nested = message.get("interactive", {}).get("button_reply") or \
+                                                  message.get("interactive", {}).get("list_reply")
+                                        if nested:
+                                            text_body = nested.get("title", "")
+                                    # other types (contacts, reaction, etc.)
                                     # remain as empty media_info — still published safely
 
                                     # Get sender info
@@ -252,6 +294,7 @@ async def receive_webhook(request: Request):
                                             "messaging_product": messaging_product,
                                         },
                                         media_info=media_info if media_info else None,
+                                        interactive_info=interactive_info if message_type == "interactive" else None,
                                     )
 
                                     # G1: Store event to SQLite (before publish)

@@ -1,7 +1,6 @@
 """KTA WhatsApp Gateway - Main FastAPI Application"""
 import logging
-import hashlib
-import hmac
+from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import FastAPI, Request, HTTPException
@@ -19,41 +18,11 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Create FastAPI app
-app = FastAPI(
-    title="KTA WhatsApp Gateway",
-    description="API Gateway for WhatsApp Cloud API integration with KTA Partai UMMAT system",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
 
-
-# ---------------------------------------------------------------------------
-# CORS (R3) - Configurable via settings
-# ---------------------------------------------------------------------------
-cors_origins: List[str] = settings.cors_origins_list
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-app.include_router(health.router, tags=["Health"])
-app.include_router(whatsapp.router, tags=["WhatsApp"])
-
-
-# ---------------------------------------------------------------------------
-# Startup / Shutdown
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def startup_event():
-    """Application startup event"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan context manager — replaces @app.on_event startup/shutdown."""
+    # Startup
     logger.info("Starting KTA WhatsApp Gateway...")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Meta Graph API version: {settings.meta_graph_api_version}")
@@ -93,14 +62,43 @@ async def startup_event():
     if not settings.whatsapp_phone_number_id:
         logger.warning("WHATSAPP_PHONE_NUMBER_ID not set - sending messages will fail")
 
+    yield  # application runs here
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Application shutdown event"""
+    # Shutdown
     logger.info("Shutting down KTA WhatsApp Gateway...")
     await whatsapp.whatsapp_service.close()
     from app.services.rabbitmq_publisher import rabbitmq_publisher
     await rabbitmq_publisher.close()
+
+
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="KTA WhatsApp Gateway",
+    description="API Gateway for WhatsApp Cloud API integration with KTA Partai UMMAT system",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# CORS (R3) - Configurable via settings
+# ---------------------------------------------------------------------------
+cors_origins: List[str] = settings.cors_origins_list
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+app.include_router(health.router, tags=["Health"])
+app.include_router(whatsapp.router, tags=["WhatsApp"])
 
 
 if __name__ == "__main__":

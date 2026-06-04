@@ -667,3 +667,124 @@ def _make_fake_event_store(captured_events: dict):
                 captured_events[event_id]["error"] = error_message
 
     return FakeEventStore()
+
+
+class TestInteractiveMessageHandling:
+    """Tests for G4: interactive message handling (button_reply, list_reply)."""
+
+    def _webhook_payload(self, message_type: str, interactive_payload: dict):
+        return {
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "id": "123456789",
+                "changes": [{
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "metadata": {"phone_number_id": "123456789"},
+                        "contacts": [{"wa_id": "6281234567890", "profile": {"name": "Test User"}}],
+                        "messages": [{
+                            "from": "6281234567890",
+                            "id": "wamid.interactive001",
+                            "timestamp": "1234567890",
+                            "type": message_type,
+                            **interactive_payload,
+                        }]
+                    },
+                    "field": "messages"
+                }]
+            }]
+        }
+
+    def test_button_reply_interactive(self):
+        """Button reply interactive messages should be parsed with correct metadata."""
+        captured_events = {}
+
+        async def mock_publish(event, routing_key):
+            captured_events[event["event_id"]] = event
+            return True
+
+        payload = self._webhook_payload("interactive", {
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {
+                    "id": "btn_yes_001",
+                    "title": "Ya, saya tertarik"
+                }
+            }
+        })
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", False), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=payload)
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+        events = list(captured_events.values())
+        assert len(events) == 1
+        evt = events[0]
+        assert evt["message"]["type"] == "interactive"
+        assert evt["message"]["interactive"]["type"] == "button_reply"
+        assert evt["message"]["interactive"]["id"] == "btn_yes_001"
+        assert evt["message"]["interactive"]["title"] == "Ya, saya tertarik"
+        assert evt["message"]["text_body"] == "Ya, saya tertarik"
+        assert evt["message"]["interactive"].get("description") is None  # no description for button
+
+    def test_list_reply_interactive(self):
+        """List reply interactive messages should be parsed with correct metadata."""
+        captured_events = {}
+
+        async def mock_publish(event, routing_key):
+            captured_events[event["event_id"]] = event
+            return True
+
+        payload = self._webhook_payload("interactive", {
+            "interactive": {
+                "type": "list_reply",
+                "list_reply": {
+                    "id": "lst_opt_a",
+                    "title": "Pilihan A",
+                    "description": "Deskripsi pilihan A"
+                }
+            }
+        })
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", False), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=payload)
+
+        assert response.status_code == 200
+        events = list(captured_events.values())
+        evt = events[0]
+        assert evt["message"]["type"] == "interactive"
+        assert evt["message"]["interactive"]["type"] == "list_reply"
+        assert evt["message"]["interactive"]["id"] == "lst_opt_a"
+        assert evt["message"]["interactive"]["title"] == "Pilihan A"
+        assert evt["message"]["interactive"]["description"] == "Deskripsi pilihan A"
+        assert evt["message"]["text_body"] == "Pilihan A"
+
+    def test_interactive_routing_key(self):
+        """Interactive messages should route to wa.inbound.interactive."""
+        from app.services.rabbitmq_publisher import build_routing_key
+        assert build_routing_key("interactive") == "wa.inbound.interactive"
+
+    def test_interactive_webhook_returns_200(self):
+        """Interactive webhook should return 200 OK even if RabbitMQ is unavailable."""
+        async def mock_publish(event, routing_key):
+            return False  # RabbitMQ down
+
+        payload = self._webhook_payload("interactive", {
+            "interactive": {
+                "button_reply": {"id": "btn_001", "title": "OK"}
+            }
+        })
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", False), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=payload)
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
