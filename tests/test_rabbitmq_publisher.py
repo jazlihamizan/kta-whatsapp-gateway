@@ -122,15 +122,15 @@ class TestRabbitMQPublisher:
         assert result is True  # Should not block webhook
 
     @pytest.mark.asyncio
-    async def test_publish_returns_true_on_error(self):
-        """Test that connection/publish error returns True (webhook still 200)"""
+    async def test_publish_returns_false_on_error(self):
+        """Test that connection/publish error returns False (caller updates event_store to failed)"""
         publisher = RabbitMQPublisher()
         publisher.enabled = True
 
         # _ensure_connection raises exception
         with patch.object(publisher, '_ensure_connection', side_effect=Exception("Connection failed")):
             result = await publisher.publish({"event": "test"}, "wa.inbound.text")
-            assert result is True  # Should still return True so webhook returns 200
+            assert result is False  # Returns False so event_store marks as 'failed'
 
     @pytest.mark.asyncio
     async def test_publish_success_returns_true(self):

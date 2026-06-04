@@ -75,6 +75,14 @@ async def startup_event():
     else:
         logger.info("Rate limiting DISABLED (default)")
 
+    # Event store (G1)
+    if settings.event_store_enabled:
+        from app.services.event_store import init_event_store
+        init_event_store()
+        logger.info(f"Event store ENABLED: {settings.event_store_db_path}")
+    else:
+        logger.info("Event store DISABLED (default dev mode)")
+
     # Verify critical settings
     if not settings.whatsapp_verify_token:
         logger.warning("WHATSAPP_VERIFY_TOKEN not set - webhook verification will fail")

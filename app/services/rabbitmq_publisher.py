@@ -156,7 +156,7 @@ class RabbitMQPublisher:
 
         except Exception as e:
             logger.error(f"Failed to publish event to RabbitMQ: {e}")
-            return True  # Return True so webhook still returns 200 to Meta
+            return False  # Return False so caller can update event_store status to 'failed'
 
     async def close(self):
         """Close RabbitMQ connection."""

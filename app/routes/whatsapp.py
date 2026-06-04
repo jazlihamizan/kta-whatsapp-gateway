@@ -12,6 +12,7 @@ from pathlib import Path
 from app.config import settings
 from app.services.whatsapp_service import WhatsAppService
 from app.services.rabbitmq_publisher import rabbitmq_publisher, build_wa_event, build_routing_key
+from app.services.event_store import get_event_store
 from app.schemas.whatsapp import SendMessageRequest, SendMessageResponse
 from app.middleware.rate_limit import check_rate_limit
 
@@ -253,9 +254,29 @@ async def receive_webhook(request: Request):
                                         media_info=media_info if media_info else None,
                                     )
 
-                                    # Publish to RabbitMQ (async, non-blocking)
+                                    # G1: Store event to SQLite (before publish)
                                     routing_key = build_routing_key(message_type)
-                                    await rabbitmq_publisher.publish(event, routing_key)
+                                    event_store = get_event_store()
+                                    event_store.store_event(event, routing_key=routing_key, publish_status="pending")
+
+                                    # Publish to RabbitMQ and track status
+                                    try:
+                                        published = await rabbitmq_publisher.publish(event, routing_key)
+                                        if published:
+                                            event_store.update_publish_status(event["event_id"], "published")
+                                        else:
+                                            # Publish returned False (connection/encoding failure)
+                                            event_store.update_publish_status(
+                                                event["event_id"], "failed",
+                                                error_message="RabbitMQ publish returned False"
+                                            )
+                                    except Exception as pub_err:
+                                        # Unexpected exception (not a publish return-value failure)
+                                        logger.error(f"RabbitMQ publish failed for {event.get('event_id')}: {pub_err}")
+                                        event_store.update_publish_status(
+                                            event["event_id"], "failed", error_message=str(pub_err)
+                                        )
+                                        # Webhook still returns 200 OK to Meta (contract)
 
         # Always return 200 to Meta, even if RabbitMQ fails
         return {"status": "ok"}

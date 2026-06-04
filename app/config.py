@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     rate_limit_requests_per_minute: int = 60
     rate_limit_burst: int = 10
 
+    # Event store (SQLite persistence for webhook events)
+    event_store_enabled: bool = False  # default off for dev safety
+    event_store_db_path: str = "data/whatsapp_gateway.db"  # relative to project root
+
     class Config:
         env_file = ".env"
         case_sensitive = False

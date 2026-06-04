@@ -45,6 +45,12 @@ htmlcov/
 *.log
 logs/
 
+# Local data / SQLite databases
+data/
+*.db
+*.sqlite
+*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db

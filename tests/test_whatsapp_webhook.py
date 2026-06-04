@@ -547,3 +547,123 @@ class TestSendMessageReplyTo:
             data = response.json()
             assert data["status"] == "success"
             mock_send.assert_called_once_with("6281234567890", "Hello back!", reply_to="wamid.original123")
+
+
+class TestPublishStatusTracking:
+    """Tests for G1: event store publish status tracking via webhook.
+
+    Verifies:
+    - publish success → event marked 'published'
+    - publish fails (False return) → event marked 'failed'
+    - webhook always returns 200 OK to Meta (regardless of publish result)
+    """
+
+    def _webhook_payload(self, message_type="text", extra_message=None):
+        msg = {"from": "6281234567890", "id": "wamid.test123",
+               "timestamp": "1234567890", "type": message_type}
+        if message_type == "text":
+            msg["text"] = {"body": "Hello world"}
+        if extra_message:
+            msg.update(extra_message)
+        return {
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "id": "123456789",
+                "changes": [{
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "metadata": {"phone_number_id": "123456789"},
+                        "contacts": [{"wa_id": "6281234567890", "profile": {"name": "Test User"}}],
+                        "messages": [msg]
+                    },
+                    "field": "messages"
+                }]
+            }]
+        }
+
+    def test_publish_succeeded_marks_event_published(self):
+        """When RabbitMQ publish succeeds (returns True), event status becomes 'published'."""
+        captured_events = {}
+
+        async def mock_publish(event, routing_key):
+            captured_events[event["event_id"]] = {"status": "pending"}
+            return True  # success
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", True), \
+             patch("app.routes.whatsapp.get_event_store",
+                   return_value=_make_fake_event_store(captured_events)), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=self._webhook_payload())
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        # Check event was stored with 'published' status
+        evt_id = captured_events.get("__last_event_id__")
+        assert evt_id is not None
+        assert captured_events[evt_id]["status"] == "published"
+        assert captured_events[evt_id].get("error") is None
+
+    def test_publish_failed_marks_event_failed(self):
+        """When RabbitMQ publish fails (returns False), event status becomes 'failed' and webhook still returns 200."""
+        captured_events = {}
+
+        async def mock_publish(event, routing_key):
+            captured_events[event["event_id"]] = {"status": "pending"}
+            return False  # failure - publish didn't work
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", True), \
+             patch("app.routes.whatsapp.get_event_store",
+                   return_value=_make_fake_event_store(captured_events)), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=self._webhook_payload())
+
+        # Webhook MUST return 200 OK to Meta regardless of publish failure
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        # Event should be marked 'failed'
+        evt_id = captured_events.get("__last_event_id__")
+        assert evt_id is not None
+        assert captured_events[evt_id]["status"] == "failed"
+        assert "RabbitMQ publish returned False" in captured_events[evt_id].get("error", "")
+
+    def test_publish_exception_marks_event_failed(self):
+        """When RabbitMQ publish raises an exception, event status becomes 'failed' and webhook still 200."""
+        captured_events = {}
+
+        async def mock_publish(event, routing_key):
+            captured_events[event["event_id"]] = {"status": "pending"}
+            raise ConnectionError("RabbitMQ connection refused")
+
+        with patch.object(settings, "whatsapp_signature_verify_enabled", False), \
+             patch.object(settings, "event_store_enabled", True), \
+             patch("app.routes.whatsapp.get_event_store",
+                   return_value=_make_fake_event_store(captured_events)), \
+             patch("app.services.rabbitmq_publisher.rabbitmq_publisher.publish", mock_publish):
+            response = client.post("/webhook/whatsapp", json=self._webhook_payload())
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        evt_id = captured_events.get("__last_event_id__")
+        assert captured_events[evt_id]["status"] == "failed"
+        assert "RabbitMQ connection refused" in captured_events[evt_id].get("error", "")
+
+
+def _make_fake_event_store(captured_events: dict):
+    """Factory that returns a lightweight EventStore-like mock that captures status changes."""
+    class FakeEventStore:
+        def store_event(self, event, routing_key=None, publish_status="pending"):
+            evt_id = event["event_id"]
+            captured_events[evt_id] = {"status": publish_status}
+            captured_events["__last_event_id__"] = evt_id
+            return 1
+
+        def update_publish_status(self, event_id, status, error_message=None):
+            if event_id not in captured_events:
+                captured_events[event_id] = {}
+            captured_events[event_id]["status"] = status
+            if error_message:
+                captured_events[event_id]["error"] = error_message
+
+    return FakeEventStore()
