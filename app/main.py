@@ -1,10 +1,15 @@
 """KTA WhatsApp Gateway - Main FastAPI Application"""
 import logging
-from fastapi import FastAPI
+import hashlib
+import hmac
+from typing import List
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routes import health, whatsapp
+from app.middleware.rate_limit import check_rate_limit, _rate_limiter
 
 # Configure logging
 logging.basicConfig(
@@ -23,26 +28,52 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware (configure as needed)
+
+# ---------------------------------------------------------------------------
+# CORS (R3) - Configurable via settings
+# ---------------------------------------------------------------------------
+cors_origins: List[str] = settings.cors_origins_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Configure specific origins in production
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 app.include_router(health.router, tags=["Health"])
 app.include_router(whatsapp.router, tags=["WhatsApp"])
 
 
+# ---------------------------------------------------------------------------
+# Startup / Shutdown
+# ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
     """Application startup event"""
     logger.info("Starting KTA WhatsApp Gateway...")
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Meta Graph API version: {settings.meta_graph_api_version}")
+
+    # Signature verification (R1)
+    if settings.whatsapp_signature_verify_enabled:
+        logger.info("X-Hub-Signature-256 verification ENABLED")
+        if not settings.whatsapp_app_secret:
+            logger.warning("WHATSAPP_APP_SECRET is empty - signature verification will reject all requests!")
+    else:
+        logger.info("X-Hub-Signature-256 verification DISABLED (default dev mode)")
+
+    # CORS (R3)
+    logger.info(f"CORS allow_origins: {settings.cors_allow_origins}")
+
+    # Rate limiting (R6)
+    if settings.rate_limit_enabled:
+        logger.info(f"Rate limiting ENABLED: {settings.rate_limit_requests_per_minute} req/min, burst {settings.rate_limit_burst}")
+    else:
+        logger.info("Rate limiting DISABLED (default)")
 
     # Verify critical settings
     if not settings.whatsapp_verify_token:

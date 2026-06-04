@@ -4,7 +4,8 @@ from fastapi.responses import PlainTextResponse
 from typing import Optional
 import logging
 import json
-import os
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.config import settings
 from app.services.whatsapp_service import WhatsAppService
 from app.services.rabbitmq_publisher import rabbitmq_publisher, build_wa_event, build_routing_key
 from app.schemas.whatsapp import SendMessageRequest, SendMessageResponse
+from app.middleware.rate_limit import check_rate_limit
 
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_FILE = LOG_DIR / "webhook_events.jsonl"
@@ -46,6 +48,76 @@ def _log_webhook_event(event_type: str, sender: str = None, message_type: str = 
         logger.error(f"Failed to write webhook log: {e}")
 
 
+# ---------------------------------------------------------------------------
+# R1: X-Hub-Signature-256 Verification
+# ---------------------------------------------------------------------------
+async def _verify_signature(request: Request) -> Optional[str]:
+    """
+    Verify X-Hub-Signature-256 header if verification is enabled.
+
+    Returns:
+        None if verification passes or is disabled.
+        Error message string if verification fails.
+    """
+    if not settings.whatsapp_signature_verify_enabled:
+        return None
+
+    secret = settings.whatsapp_app_secret
+    if not secret:
+        # Verification enabled but no secret configured - fail closed, reject the request
+        return "WHATSAPP_APP_SECRET is not configured but WHATSAPP_SIGNATURE_VERIFY_ENABLED=true"
+
+    sig_header = request.headers.get("x-hub-signature-256", "")
+    if not sig_header:
+        return "Missing X-Hub-Signature-256 header"
+
+    if not sig_header.startswith("sha256="):
+        return "Invalid X-Hub-Signature-256 format"
+
+    expected_hex = sig_header[len("sha256="):]
+
+    # Read request body
+    body = await request.body()
+
+    computed_hex = hmac.new(
+        secret.encode("utf-8"),
+        body,
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_hex, computed_hex):
+        return "Invalid X-Hub-Signature-256"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# R2: Metadata handling - structured logging without leaking to Meta
+# ---------------------------------------------------------------------------
+def _log_metadata_safely(metadata: dict, context: str = "send_message"):
+    """
+    Log metadata internally without exposing to external APIs or logs.
+    Uses structured logging with redaction for sensitive fields.
+
+    NOTE: This logs metadata for internal traceability. Metadata is NOT forwarded
+    to Meta WhatsApp API (Meta doesn't support arbitrary metadata fields).
+    """
+    if not metadata:
+        return
+
+    # Redact known sensitive fields before logging
+    sensitive_keys = {"token", "key", "secret", "password", "bearer", "authorization", "api_key", "apikey"}
+    safe_metadata = {
+        k: ("***REDACTED***" if any(sk in str(k).lower() for sk in sensitive_keys) else str(v)[:200])
+        for k, v in metadata.items()
+    }
+
+    logger.debug(f"[{context}] metadata received: {safe_metadata}")
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 @router.get("/webhook/whatsapp")
 async def verify_webhook(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
@@ -102,6 +174,17 @@ async def receive_webhook(request: Request):
     Validates, parses, publishes to RabbitMQ, returns 200 to Meta.
     Does NOT perform business logic.
     """
+    # R1: Check signature before processing
+    sig_error = await _verify_signature(request)
+    if sig_error:
+        logger.warning(f"Webhook signature verification failed: {sig_error}")
+        raise HTTPException(status_code=401, detail=sig_error)
+
+    # R6: Rate limiting
+    rate_limited = check_rate_limit(request)
+    if rate_limited:
+        return rate_limited
+
     try:
         body = await request.json()
         logger.info(f"Received webhook payload")
@@ -177,6 +260,8 @@ async def receive_webhook(request: Request):
         # Always return 200 to Meta, even if RabbitMQ fails
         return {"status": "ok"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}")
         # Still return 200 to Meta to prevent webhook retry storms
@@ -184,10 +269,21 @@ async def receive_webhook(request: Request):
 
 
 @router.post("/send-message", response_model=SendMessageResponse)
-async def send_message(request: SendMessageRequest):
+async def send_message(request: Request, send_req: SendMessageRequest):
     """Send a WhatsApp message via Meta Graph API."""
+
+    # R6: Rate limiting
+    rate_limited = check_rate_limit(request)
+    if rate_limited:
+        return rate_limited
+
+    # R2: Log metadata if provided (safely, without sensitive data leak)
+    # Metadata is NOT forwarded to Meta (Meta doesn't support arbitrary metadata fields)
+    if send_req.metadata:
+        _log_metadata_safely(send_req.metadata, context="send_message")
+
     try:
-        result = await whatsapp_service.send_message(request.to, request.message, reply_to=request.reply_to)
+        result = await whatsapp_service.send_message(send_req.to, send_req.message, reply_to=send_req.reply_to)
 
         message_id = None
         if "messages" in result and len(result["messages"]) > 0:
